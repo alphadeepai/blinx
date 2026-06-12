@@ -165,6 +165,16 @@ loaded_params, loaded_config = load_lora_adapter("path/to/adapter_directory")
 
 ---
 
+## Acknowledgements
+
+This project was built with the support of the [Google TPU Research Cloud (TRC)](https://sites.research.google/trc/).
+
+<p align="left">
+  <img src="logotrc.png" width="200" alt="Google TPU Research Cloud Logo" />
+</p>
+
+---
+
 ## License
 
 This project is licensed under the **MIT License**. See below for details.
