@@ -138,28 +138,46 @@ def init_lora_params(params, lora_config: LoraConfig):
 
 
 def save_lora_adapter(path: str, params: dict, config: LoraConfig):
-    ckpt_path = os.path.join(path, "checkpoint")
-    config_dict = flax.serialization.to_state_dict(config)
+    import shutil
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
 
-    os.makedirs(path, exist_ok=True)
+    def _do_save():
+        # Save to local disk first to avoid GCS FUSE file descriptor and atomic rename issues
+        with tempfile.TemporaryDirectory(prefix="blinx_lora_") as tmp_dir:
+            tmp_ckpt_path = os.path.join(tmp_dir, "checkpoint")
+            config_dict = flax.serialization.to_state_dict(config)
 
-    with open(os.path.join(path, "adapter_config.json"), "w") as f:
-        json.dump(config_dict, f, indent=4)
+            with open(os.path.join(tmp_dir, "adapter_config.json"), "w") as f:
+                json.dump(config_dict, f, indent=4)
 
-    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    save_args = orbax_utils.save_args_from_target(params)
+            checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+            save_args = orbax_utils.save_args_from_target(params)
 
-    checkpointer.save(
-        os.path.abspath(ckpt_path),
-        params,
-        save_args=save_args,
-        force=True
-    )
+            checkpointer.save(
+                os.path.abspath(tmp_ckpt_path),
+                params,
+                save_args=save_args,
+                force=True
+            )
+
+            # Copy cleanly to target path (e.g. /workdir/gcs/...)
+            os.makedirs(path, exist_ok=True)
+            shutil.copy2(os.path.join(tmp_dir, "adapter_config.json"), os.path.join(path, "adapter_config.json"))
+            target_ckpt = os.path.join(path, "checkpoint")
+            if os.path.exists(target_ckpt):
+                shutil.rmtree(target_ckpt, ignore_errors=True)
+            shutil.copytree(tmp_ckpt_path, target_ckpt, dirs_exist_ok=True)
+
+    # Run in a separate thread so orbax does not see or conflict with uvloop via nest_asyncio
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(_do_save).result()
 
     print(f"blinx adapter saved to: {path}")
 
 
 def load_lora_adapter(path: str) -> Tuple[dict, LoraConfig]:
+    from concurrent.futures import ThreadPoolExecutor
     config_path = os.path.join(path, "adapter_config.json")
     ckpt_path = os.path.join(path, "checkpoint")
 
@@ -173,8 +191,12 @@ def load_lora_adapter(path: str) -> Tuple[dict, LoraConfig]:
     rules = [LoraRule(**r) for r in rules_data.values()]
     config = LoraConfig(rules=rules, **config_dict)
 
-    checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    lora_params = checkpointer.restore(os.path.abspath(ckpt_path))
+    def _do_restore():
+        checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+        return checkpointer.restore(os.path.abspath(ckpt_path))
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        lora_params = executor.submit(_do_restore).result()
 
     return lora_params, config
 
